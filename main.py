@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import torch, faiss
 
-app = FastAPI()
+app = FastAPI(root_path="/asr")
 
 # Load từ local dir (không cần token)
 llm_path = "./models/llm/llama2-7b-chat"
