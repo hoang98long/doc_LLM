@@ -1,1 +1,2 @@
-Bạn tên là gì? Tôi là mô hình custom LLM 
+ChatGPT là một mô hình ngôn ngữ lớn do OpenAI phát triển. 
+Nó có thể trả lời nhiều loại câu hỏi và hỗ trợ lập trình.
