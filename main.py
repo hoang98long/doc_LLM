@@ -1,52 +1,74 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import torch, faiss
 
-app = FastAPI(root_path="/asr")
+app = FastAPI()
 
-# Load từ local dir (không cần token)
+# --- Load local models ---
 llm_path = "./models/llm/llama2-7b-chat"
 embed_path = "./models/embeddings/all-MiniLM-L6-v2"
 
-# LLM
 tokenizer = AutoTokenizer.from_pretrained(llm_path)
 model = AutoModelForCausalLM.from_pretrained(
     llm_path,
     device_map="auto",
     torch_dtype="auto"
 )
-
-# Embedding model
 embed_model = SentenceTransformer(embed_path)
 
-# FAISS index
+# FAISS DB
 dimension = embed_model.get_sentence_embedding_dimension()
 index = faiss.IndexFlatL2(dimension)
 documents = []
 
-class Document(BaseModel):
-    text: str
 
+# --- Schema ---
 class Query(BaseModel):
     question: str
+    max_new_tokens: int = 200
 
-@app.post("/upload_doc")
-def upload_doc(doc: Document):
-    emb = embed_model.encode([doc.text])
-    index.add(emb)
-    documents.append(doc.text)
-    return {"status": "ok", "doc_id": len(documents)-1}
 
+# --- Upload tài liệu dạng file txt ---
+@app.post("/upload_file")
+async def upload_file(file: UploadFile = File(...)):
+    content = (await file.read()).decode("utf-8")
+    # chunk đơn giản theo dòng
+    for line in content.split("\n"):
+        if line.strip():
+            emb = embed_model.encode([line])
+            index.add(emb)
+            documents.append(line.strip())
+    return {"status": "uploaded", "chunks": len(documents)}
+
+
+# --- Đặt câu hỏi ---
 @app.post("/ask")
-def ask(query: Query):
+def ask_question(query: Query):
+    if len(documents) == 0:
+        return {"error": "Chưa có tài liệu nào, hãy upload trước."}
+
     q_emb = embed_model.encode([query.question])
     D, I = index.search(q_emb, k=1)
-    context = documents[I[0][0]] if len(documents) > 0 else ""
+    context = documents[I[0][0]]
 
-    prompt = f"Context: {context}\nQuestion: {query.question}\nAnswer:"
+    prompt = f"""Bạn là trợ lý AI, hãy trả lời dựa trên tài liệu dưới đây.
+
+    TÀI LIỆU:
+    {context}
+
+    CÂU HỎI: {query.question}
+    TRẢ LỜI:
+    """
+
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=200)
+    outputs = model.generate(
+        **inputs,
+        max_new_tokens=query.max_new_tokens,
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.9
+    )
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return {"answer": answer, "context": context}
