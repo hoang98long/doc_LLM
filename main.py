@@ -1,16 +1,17 @@
 from fastapi import FastAPI, UploadFile, File
+from typing import List
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import torch, faiss, pandas as pd
 from docx import Document
-import io
+import io, pickle, os, datetime
 
-app = FastAPI()
+app = FastAPI(title="RAG Multi-file API", description="Upload nhiều file và hỏi LLM")
 
 # --------- Load local models ----------
 llm_path = "./models/llm/llama2-7b-chat"
-embed_path = "./models/embeddings/all-MiniLM-L6-v2"
+embed_path = "./models/embeddings/bge-m3"  # model embedding mạnh đã tải
 
 tokenizer = AutoTokenizer.from_pretrained(llm_path)
 model = AutoModelForCausalLM.from_pretrained(
@@ -20,15 +21,25 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 embed_model = SentenceTransformer(embed_path)
 
-# --------- FAISS index ----------
-dimension = embed_model.get_sentence_embedding_dimension()
-index = faiss.IndexFlatL2(dimension)
-documents = []
+# --------- File paths ----------
+FAISS_PATH = "index.faiss"
+DOCS_PATH = "documents.pkl"
 
+# --------- Initialize or load existing index ----------
+dimension = embed_model.get_sentence_embedding_dimension()
+if os.path.exists(FAISS_PATH) and os.path.exists(DOCS_PATH):
+    print("🔹 Loading existing FAISS index and documents...")
+    index = faiss.read_index(FAISS_PATH)
+    with open(DOCS_PATH, "rb") as f:
+        documents = pickle.load(f)
+else:
+    print("🆕 Creating new FAISS index...")
+    index = faiss.IndexFlatL2(dimension)
+    documents = []
 
 # --------- Helpers ----------
 def read_txt(file_bytes: bytes):
-    return file_bytes.decode("utf-8")
+    return file_bytes.decode("utf-8", errors="ignore")
 
 def read_docx(file_bytes: bytes):
     doc = Document(io.BytesIO(file_bytes))
@@ -42,48 +53,62 @@ def read_xlsx(file_bytes: bytes):
         text_chunks.append(df.to_string(index=False))
     return "\n".join(text_chunks)
 
-
 def chunk_text(text, chunk_size=300):
-    """Chia tài liệu thành đoạn nhỏ 300 từ để dễ tìm kiếm"""
     words = text.split()
-    chunks = []
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i:i+chunk_size])
-        chunks.append(chunk)
-    return chunks
+    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
+def save_index_and_docs():
+    faiss.write_index(index, FAISS_PATH)
+    with open(DOCS_PATH, "wb") as f:
+        pickle.dump(documents, f)
+    print("💾 Đã lưu FAISS và documents thành công.")
 
-# --------- API models ----------
+# --------- API Models ----------
 class Query(BaseModel):
     question: str
     max_new_tokens: int = 300
 
+# --------- Upload nhiều file ----------
+@app.post("/upload_files")
+async def upload_files(files: List[UploadFile] = File(...)):
+    uploaded_info = []
+    for file in files:
+        ext = file.filename.split(".")[-1].lower()
+        content = await file.read()
 
-# --------- Upload tài liệu đa định dạng ----------
-@app.post("/upload_file")
-async def upload_file(file: UploadFile = File(...)):
-    ext = file.filename.split(".")[-1].lower()
-    content = await file.read()
+        if ext == "txt":
+            text = read_txt(content)
+        elif ext == "docx":
+            text = read_docx(content)
+        elif ext in ["xls", "xlsx"]:
+            text = read_xlsx(content)
+        else:
+            uploaded_info.append({"file": file.filename, "status": "unsupported"})
+            continue
 
-    if ext == "txt":
-        text = read_txt(content)
-    elif ext == "docx":
-        text = read_docx(content)
-    elif ext in ["xls", "xlsx"]:
-        text = read_xlsx(content)
-    else:
-        return {"error": f"Định dạng {ext} chưa được hỗ trợ."}
+        chunks = chunk_text(text)
+        embeddings = embed_model.encode(chunks)
+        index.add(embeddings)
+        upload_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    chunks = chunk_text(text)
-    for c in chunks:
-        emb = embed_model.encode([c])
-        index.add(emb)
-        documents.append(c)
+        for chunk in chunks:
+            documents.append({
+                "file": file.filename,
+                "text": chunk,
+                "upload_time": upload_time
+            })
 
-    return {"status": "uploaded", "chunks": len(chunks), "file": file.filename}
+        uploaded_info.append({"file": file.filename, "chunks": len(chunks)})
 
+    save_index_and_docs()
+    return {
+        "status": "uploaded",
+        "total_files": len(uploaded_info),
+        "files": uploaded_info,
+        "total_documents": len(documents)
+    }
 
-# --------- Prompt engineering + Ask ----------
+# --------- Ask question ----------
 @app.post("/ask")
 def ask_question(query: Query):
     if len(documents) == 0:
@@ -91,29 +116,41 @@ def ask_question(query: Query):
 
     q_emb = embed_model.encode([query.question])
     D, I = index.search(q_emb, k=3)
-    retrieved = "\n\n".join([documents[i] for i in I[0]])
+    retrieved = "\n\n".join([documents[i]["text"] for i in I[0]])
 
-    # Prompt engineering — hướng dẫn rõ ràng hơn
+    # Prompt engineering để tăng độ chính xác
     prompt = f"""
-Bạn là một trợ lý AI chuyên trả lời câu hỏi dựa trên tài liệu. 
-Hãy sử dụng nội dung trong phần "Ngữ cảnh" bên dưới để trả lời chính xác, ngắn gọn, bằng tiếng Việt.
-Nếu không tìm thấy thông tin trong tài liệu, hãy nói "Tôi không tìm thấy thông tin trong tài liệu."
+Bạn là một trợ lý AI thông minh, hãy trả lời CÂU HỎI dựa vào NGỮ CẢNH dưới đây.
+Nếu không có thông tin phù hợp, hãy nói rõ: "Tôi không tìm thấy thông tin trong tài liệu."
 
-Ngữ cảnh:
+--- NGỮ CẢNH ---
 {retrieved}
 
-Câu hỏi: {query.question}
+--- CÂU HỎI ---
+{query.question}
 
-Câu trả lời:
+--- TRẢ LỜI ---
 """
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
         max_new_tokens=query.max_new_tokens,
-        do_sample=True,
         temperature=0.3,
         top_p=0.9
     )
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return {"answer": answer, "context_used": retrieved[:500]}  # cắt ngắn context cho dễ đọc
+    return {
+        "answer": answer.split("--- TRẢ LỜI ---")[-1].strip(),
+        "context_used": retrieved[:500]
+    }
+
+# --------- Reset toàn bộ dữ liệu ----------
+@app.post("/reset_index")
+def reset_index():
+    global index, documents
+    index = faiss.IndexFlatL2(dimension)
+    documents = []
+    if os.path.exists(FAISS_PATH): os.remove(FAISS_PATH)
+    if os.path.exists(DOCS_PATH): os.remove(DOCS_PATH)
+    return {"status": "reset", "message": "Đã xóa toàn bộ dữ liệu."}
