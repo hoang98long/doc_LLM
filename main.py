@@ -120,17 +120,19 @@ def ask_question(query: Query):
 
     # Prompt engineering để tăng độ chính xác
     prompt = f"""
-Bạn là một trợ lý AI thông minh, hãy trả lời CÂU HỎI dựa vào NGỮ CẢNH dưới đây.
-Nếu không có thông tin phù hợp, hãy nói rõ: "Tôi không tìm thấy thông tin trong tài liệu."
+    Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢNH sau đây và trả lời CÂU HỎI.
+    - Trích dẫn đúng thông tin trong tài liệu, không suy diễn.
+    - Nếu tài liệu có đoạn liên quan, hãy tổng hợp lại thành câu văn rõ ràng, súc tích.
+    - Nếu không có thông tin, chỉ cần trả lời: "Không tìm thấy thông tin liên quan."
 
---- NGỮ CẢNH ---
-{retrieved}
+    --- NGỮ CẢNH ---
+    {retrieved}
 
---- CÂU HỎI ---
-{query.question}
+    --- CÂU HỎI ---
+    {query.question}
 
---- TRẢ LỜI ---
-"""
+    --- TRẢ LỜI (bằng tiếng Việt) ---
+    """
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
