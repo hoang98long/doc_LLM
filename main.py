@@ -1,17 +1,17 @@
 from fastapi import FastAPI, UploadFile, File
-from typing import List, Optional
+from typing import List
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sentence_transformers import SentenceTransformer
 import torch, faiss, pandas as pd
 from docx import Document
-import io, pickle, os, datetime, re
+import io, pickle, os, datetime
 
-app = FastAPI(title="RAG Multi-file API", description="Upload nhiều file và hỏi LLM với prompt tối ưu")
+app = FastAPI(title="RAG Multi-file API", description="Upload nhiều file và hỏi LLM")
 
 # --------- Load local models ----------
 llm_path = "./models/llm/llama2-7b-chat"
-embed_path = "./models/embeddings/bge-m3"  # hoặc intfloat/multilingual-e5-large
+embed_path = "./models/embeddings/bge-m3"  # model embedding mạnh đã tải
 
 tokenizer = AutoTokenizer.from_pretrained(llm_path)
 model = AutoModelForCausalLM.from_pretrained(
@@ -53,22 +53,9 @@ def read_xlsx(file_bytes: bytes):
         text_chunks.append(df.to_string(index=False))
     return "\n".join(text_chunks)
 
-def smart_chunk(text, chunk_size=350):
-    """Tách văn bản thành đoạn thông minh dựa trên tiêu đề / độ dài."""
-    # tách theo tiêu đề hoặc dòng trống
-    parts = re.split(r'\n(?=\d+\.)|\n(?=\(\d+\))|(?=\n[A-Z])', text)
-    chunks = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        words = p.split()
-        if len(words) > chunk_size:
-            for i in range(0, len(words), chunk_size):
-                chunks.append(" ".join(words[i:i+chunk_size]))
-        else:
-            chunks.append(p)
-    return chunks
+def chunk_text(text, chunk_size=300):
+    words = text.split()
+    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
 def save_index_and_docs():
     faiss.write_index(index, FAISS_PATH)
@@ -80,7 +67,6 @@ def save_index_and_docs():
 class Query(BaseModel):
     question: str
     max_new_tokens: int = 300
-    debug: Optional[bool] = False  # nếu True -> trả thêm raw_answer và context
 
 # --------- Upload nhiều file ----------
 @app.post("/upload_files")
@@ -100,7 +86,7 @@ async def upload_files(files: List[UploadFile] = File(...)):
             uploaded_info.append({"file": file.filename, "status": "unsupported"})
             continue
 
-        chunks = smart_chunk(text)
+        chunks = chunk_text(text)
         embeddings = embed_model.encode(chunks)
         index.add(embeddings)
         upload_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -129,24 +115,24 @@ def ask_question(query: Query):
         return {"error": "Chưa có tài liệu nào, hãy upload trước."}
 
     q_emb = embed_model.encode([query.question])
-    D, I = index.search(q_emb, k=8)  # lấy nhiều đoạn hơn
+    D, I = index.search(q_emb, k=3)
     retrieved = "\n\n".join([documents[i]["text"] for i in I[0]])
 
-    # Prompt tối ưu tiếng Việt
+    # Prompt engineering để tăng độ chính xác
     prompt = f"""
-Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢNH sau đây và trả lời CÂU HỎI.
-- Trích dẫn đúng thông tin trong tài liệu, không suy diễn.
-- Nếu tài liệu có đoạn liên quan, hãy tổng hợp lại thành câu văn rõ ràng, súc tích.
-- Nếu không có thông tin, chỉ cần trả lời: "Không tìm thấy thông tin liên quan."
+    Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢNH sau đây và trả lời CÂU HỎI.
+    - Trích dẫn đúng thông tin trong tài liệu, không suy diễn.
+    - Nếu tài liệu có đoạn liên quan, hãy tổng hợp lại thành câu văn rõ ràng, súc tích.
+    - Nếu không có thông tin, chỉ cần trả lời: "Không tìm thấy thông tin liên quan."
 
---- NGỮ CẢNH ---
-{retrieved}
+    --- NGỮ CẢNH ---
+    {retrieved}
 
---- CÂU HỎI ---
-{query.question}
+    --- CÂU HỎI ---
+    {query.question}
 
---- TRẢ LỜI (bằng tiếng Việt) ---
-"""
+    --- TRẢ LỜI (bằng tiếng Việt) ---
+    """
 
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
@@ -155,23 +141,11 @@ Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢN
         temperature=0.3,
         top_p=0.9
     )
-    raw_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-    # -------- Làm sạch output --------
-    clean_answer = raw_text.split("--- TRẢ LỜI")[-1]
-    clean_answer = clean_answer.replace("(bằng tiếng Việt)", "")
-    clean_answer = clean_answer.replace(":", "").strip()
-    if "--- NGỮ CẢNH" in clean_answer:
-        clean_answer = clean_answer.split("--- NGỮ CẢNH")[0].strip()
-
-    # Kết quả đầu ra
-    result = {"answer": clean_answer}
-
-    if query.debug:
-        result["context_used"] = retrieved[:600] + "..."
-        result["raw_answer"] = raw_text
-
-    return result
+    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return {
+        "answer": answer.split("--- TRẢ LỜI ---")[-1].strip(),
+        "context_used": retrieved[:500]
+    }
 
 # --------- Reset toàn bộ dữ liệu ----------
 @app.post("/reset_index")
