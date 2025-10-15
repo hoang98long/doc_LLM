@@ -109,31 +109,34 @@ async def upload_files(files: List[UploadFile] = File(...)):
     }
 
 # --------- Ask question ----------
+# --------- Ask question ----------
 @app.post("/ask")
 def ask_question(query: Query):
     if len(documents) == 0:
         return {"error": "Chưa có tài liệu nào, hãy upload trước."}
 
+    # Tạo embedding cho câu hỏi và tìm đoạn liên quan
     q_emb = embed_model.encode([query.question])
-    D, I = index.search(q_emb, k=3)
+    D, I = index.search(q_emb, k=5)  # lấy nhiều đoạn hơn một chút để đủ ngữ cảnh
     retrieved = "\n\n".join([documents[i]["text"] for i in I[0]])
 
-    # Prompt engineering để tăng độ chính xác
+    # Prompt tối ưu
     prompt = f"""
-    Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢNH sau đây và trả lời CÂU HỎI.
-    - Trích dẫn đúng thông tin trong tài liệu, không suy diễn.
-    - Nếu tài liệu có đoạn liên quan, hãy tổng hợp lại thành câu văn rõ ràng, súc tích.
-    - Nếu không có thông tin, chỉ cần trả lời: "Không tìm thấy thông tin liên quan."
+Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢNH sau đây và trả lời CÂU HỎI.
+- Trích dẫn đúng thông tin trong tài liệu, không suy diễn.
+- Nếu tài liệu có đoạn liên quan, hãy tổng hợp lại thành câu văn rõ ràng, súc tích.
+- Nếu không có thông tin, chỉ cần trả lời: "Không tìm thấy thông tin liên quan."
 
-    --- NGỮ CẢNH ---
-    {retrieved}
+--- NGỮ CẢNH ---
+{retrieved}
 
-    --- CÂU HỎI ---
-    {query.question}
+--- CÂU HỎI ---
+{query.question}
 
-    --- TRẢ LỜI (bằng tiếng Việt) ---
-    """
+--- TRẢ LỜI (bằng tiếng Việt) ---
+"""
 
+    # Sinh câu trả lời
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
@@ -141,11 +144,34 @@ def ask_question(query: Query):
         temperature=0.3,
         top_p=0.9
     )
-    answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return {
-        "answer": answer,
-        "context_used": retrieved[:500]
-    }
+    raw_answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+    # -------- Làm sạch output, chỉ giữ phần trả lời thật sự --------
+    # Cắt phần sau nhãn "--- TRẢ LỜI"
+    clean_answer = raw_answer.split("--- TRẢ LỜI")[-1]
+    clean_answer = clean_answer.replace("(bằng tiếng Việt)", "")
+    clean_answer = clean_answer.replace(":", "").strip()
+
+    # Nếu mô hình nhắc lại prompt, loại bỏ lại phần thừa
+    for tag in ["--- NGỮ CẢNH", "--- CÂU HỎI", "Bạn là một chuyên gia"]:
+        if tag in clean_answer:
+            clean_answer = clean_answer.split(tag)[0].strip()
+
+    # Nếu vẫn trống, fallback bằng cách lấy 2 dòng cuối cùng
+    if not clean_answer:
+        lines = [l.strip() for l in raw_answer.splitlines() if l.strip()]
+        clean_answer = " ".join(lines[-3:])
+
+    # Kết quả gọn gàng
+    result = {"answer": clean_answer}
+
+    # Thêm thông tin debug nếu cần
+    if hasattr(query, "debug") and query.debug:
+        result["raw_answer"] = raw_answer
+        result["context_used"] = retrieved[:600] + "..."
+
+    return result
+
 
 # --------- Reset toàn bộ dữ liệu ----------
 @app.post("/reset_index")
