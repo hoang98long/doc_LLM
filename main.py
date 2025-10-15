@@ -172,8 +172,8 @@ TRẢ LỜI:
         answer = raw_text.strip()
 
     # Loại bỏ chuỗi rác (ký tự lặp)
-    answer = re.sub(r"([^\w\s])\1{3,}", "", answer)
-    answer = re.sub(r"(\b\w+\b)(?:\s+\1){2,}", r"\1", answer)
+    # answer = re.sub(r"([^\w\s])\1{3,}", "", answer)
+    # answer = re.sub(r"(\b\w+\b)(?:\s+\1){2,}", r"\1", answer)
 
     result = {"answer": answer}
 
