@@ -6,6 +6,7 @@ from sentence_transformers import SentenceTransformer
 import torch, faiss, pandas as pd
 from docx import Document
 import io, pickle, os, datetime
+import re
 
 app = FastAPI(title="RAG Multi-file API", description="Upload nhiều file và hỏi LLM")
 
@@ -140,12 +141,18 @@ Bạn là một chuyên gia phân tích quân sự, hãy đọc kỹ NGỮ CẢN
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     outputs = model.generate(
         **inputs,
-        max_new_tokens=query.max_new_tokens,
-        temperature=0.3,
-        top_p=0.9
+        max_new_tokens=min(query.max_new_tokens, 200),
+        temperature=0.1,
+        top_p=0.8
     )
-    raw_answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
+    raw_answer = tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=True
+    )
+    raw_answer = re.sub(r'([^\w\s])\1{5,}', '', raw_answer)
+    raw_answer = re.sub(r'(\b\w+\b)(?:\s+\1){3,}', r'\1', raw_answer)
     # -------- Làm sạch output, chỉ giữ phần trả lời thật sự --------
     # Cắt phần sau nhãn "--- TRẢ LỜI"
     clean_answer = raw_answer.split("--- TRẢ LỜI")[-1]
