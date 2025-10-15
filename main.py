@@ -143,7 +143,7 @@ def ask_question(query: Query):
     )
     answer = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return {
-        "answer": answer.split("--- TRẢ LỜI ---")[-1].strip(),
+        "answer": answer,
         "context_used": retrieved[:500]
     }
 
